@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Invoice Generator</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    body { font-family: 'Segoe UI', Arial, sans-serif; background: #f6f8fa; margin: 0; padding: 0;}
+    .container { max-width: 600px; margin: 32px auto; background: #fff; border-radius: 16px; box-shadow: 0 8px 32px #2a7bbd11; padding: 36px 32px 30px 32px; }
+    h1 { text-align: center; color: #2a7bbd; margin-bottom: 12px;}
+    label { display: block; margin-top: 18px; }
+    input, button { margin-top: 6px; font-size: 1em; border-radius: 7px; border: 1px solid #ddd; padding: 10px; width: 100%; box-sizing: border-box;}
+    button { background: linear-gradient(90deg,#2a7bbd 60%,#36bf7f 100%); color: white; border: none; cursor: pointer; font-weight: bold; margin-top: 18px; box-shadow: 0 2px 12px #2a7bbd22; transition: background .16s, box-shadow .18s;}
+    button:hover { background: #36bf7f; box-shadow: 0 4px 18px #2a7bbd44;}
+    #notif { display: none; position: fixed; top: 26px; right: 34px; background: #2a7bbd; color: #fff; padding: 18px 36px; border-radius: 13px; font-size: 1.1em; box-shadow: 0 6px 20px #2a7bbd55; z-index: 9999; opacity: 0; transition: opacity .55s;}
+    #notif.show { display: block; opacity: 1; animation: fadeInOut 2.8s forwards; }
+    @keyframes fadeInOut { 0%{opacity:0;} 18%{opacity:1;} 85%{opacity:1;} 100%{opacity:0;} }
+    .logs-section { margin-top: 34px; background: #eaf6ff; padding: 14px 20px 12px 20px; border-radius: 9px;}
+    #logs { font-size: .99em; max-height: 88px; overflow-y: auto; background: #fff; border-radius: 7px; padding: 10px; border: 1px solid #ccc;}
+  </style>
+</head>
+<body>
+  <div id="notif"></div>
+  <div class="container">
+    <h1>Invoice Generator</h1>
+    <form id="invoiceForm">
+      <label>Full Name (sender):<input type="text" id="user_name" required></label>
+      <label>Email:<input type="email" id="user_email" required></label>
+      <label>Phone:<input type="text" id="user_phone" required></label>
+      <label>Address:<input type="text" id="user_address" required></label>
+      <label>Hourly Rate (USD):<input type="number" id="hourly_rate" min="1" step="0.01" value="4.5" required></label>
+      <label>Upload Timesheet CSV:<input type="file" id="csvfile" accept=".csv" required></label>
+      <button type="submit">Generate Invoice PDF</button>
+    </form>
+    <div class="logs-section">
+      <button type="button" onclick="fetchLogs()" style="background:#2a7bbd;color:white">Show Logs</button>
+      <button type="button" onclick="clearLogs()" style="background:#e22;color:white">Clear Logs</button>
+      <div id="logs"></div>
+    </div>
+  </div>
+  <script>
+    // Notification pop-up
+    function showNotif(msg) {
+      const n = document.getElementById('notif');
+      n.innerText = msg;
+      n.className = 'show';
+      setTimeout(()=>{n.className='';}, 2900);
+    }
+    // Logs in localStorage
+    function fetchLogs() {
+      const logs = JSON.parse(localStorage.getItem("invoice_logs")||"[]");
+      document.getElementById("logs").innerText = logs.join("");
+    }
+    function clearLogs() {
+      localStorage.removeItem("invoice_logs");
+      fetchLogs();
+    }
+    // Load sender info from localStorage
+    window.onload = function() {
+      fetchLogs();
+      ["name","email","phone","address"].forEach(id=>{
+        let v = localStorage.getItem("invoice_"+id);
+        if (v) document.getElementById("user_"+id).value = v;
+      });
+    };
+  </script>
+  <!-- Load libraries -->
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.1.68/pdfmake.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.1.68/vfs_fonts.js"></script>
+  <script>
+document.getElementById('invoiceForm').addEventListener('submit', function(e) {
+  e.preventDefault();
+
+  // Save sender info
+  ["name","email","phone","address"].forEach(id=>{
+    localStorage.setItem("invoice_"+id, document.getElementById("user_"+id).value);
+  });
+
+  const file = document.getElementById('csvfile').files[0];
+  if (!file) { showNotif('Please upload a CSV file.'); return; }
+
+  Papa.parse(file, {
+    header: true,
+    complete: function(results) {
+      const data = results.data.filter(row =>
+        row['Date'] && row['Project Name'] && row['Task/General/Issue'] &&
+        String(row['Date']).trim() !== '' &&
+        String(row['Project Name']).trim() !== '' &&
+        String(row['Task/General/Issue']).trim() !== ''
+      );
+      if (!data.length) { showNotif('No valid time logs found!'); return; }
+
+      // Invoice details
+      const sender = {
+        name: document.getElementById('user_name').value,
+        email: document.getElementById('user_email').value,
+        phone: document.getElementById('user_phone').value,
+        address: document.getElementById('user_address').value
+      };
+      const client = {
+        name: "Virtual Gal Friday, LLC",
+        address: "13423 Blanco Rd, Unit #3197 San Antonio, TX 78216",
+        email: "invoices@virtualgalfriday.com"
+      };
+      const rate = parseFloat(document.getElementById('hourly_rate').value) || 0;
+      const invoiceNumber = "JCB" + new Date().toISOString().replace(/[-:.TZ]/g,"").slice(0,14);
+      const invoiceDate = new Date().toISOString().split('T')[0];
+
+      // Build rows, calculate totals
+      let total = 0;
+      let totalHours = 0;
+      const bodyRows = data.map(row => {
+        const hours = parseFloat(row['Hours(For Calculation)'] || 0);
+        const amount = hours * rate;
+        total += amount;
+        totalHours += hours;
+        return [
+          { text: row['Date'], style: 'dateCol' },
+          { text: row['Project Name'], style: 'cell' },
+          { text: row['Task/General/Issue'], style: 'cell' },
+          { text: hours.toFixed(2), alignment: 'center' },
+          { text: '$' + rate.toFixed(2), alignment: 'right' },
+          { text: '$' + amount.toLocaleString(undefined,{minimumFractionDigits:2}), alignment: 'right' },
+          { text: row['Notes']||'', style: 'cell' }
+        ];
+      });
+
+      // --- PDF generation: summary at END, styled like invoice # and date ---
+      const docDef = {
+        content: [
+          { text: "INVOICE", style: "header", alignment: "center", margin: [0,0,0,12] },
+          {
+            columns: [
+              [
+                { text: "From:", style: "label" },
+                { text: sender.name, bold: true },
+                { text: sender.address },
+                { text: "Email: " + sender.email, style: "mini" },
+                { text: "Phone: " + sender.phone, style: "mini" }
+              ],
+              [
+                { text: "To:", style: "label", alignment:"right" },
+                { text: client.name, bold: true, alignment:"right" },
+                { text: client.address, alignment:"right" },
+                { text: "Email: " + client.email, style: "mini", alignment:"right" }
+              ]
+            ]
+          },
+          {
+            columns: [
+              { text: `Invoice #:`, bold: true },
+              { text: invoiceNumber, color: "#2a7bbd", bold: true },
+              { text: `Date:`, alignment: "right", bold: true },
+              { text: invoiceDate, color: "#2a7bbd", alignment: "right", bold: true }
+            ],
+            margin: [0,6,0,16],
+            columnGap: 8
+          },
+          {
+            table: {
+              headerRows: 1,
+              widths: ['auto','*','*',40,50,60,'*'],
+              body: [
+                [
+                  { text: 'Date', style:'tableHeader' },
+                  { text: 'Client/Project Name', style:'tableHeader' },
+                  { text: 'Task Description', style:'tableHeader' },
+                  { text: 'Hours', style:'tableHeader', alignment:"center" },
+                  { text: 'Rate (USD)', style:'tableHeader', alignment:"right" },
+                  { text: 'Amount (USD)', style:'tableHeader', alignment:"right" },
+                  { text: 'Notes', style:'tableHeader' }
+                ],
+                ...bodyRows
+              ]
+            },
+            layout: {
+              fillColor: function (row, node, col) { return (row%2===0 && row!==0) ? '#f8fafc' : null; }
+            }
+          },
+          {
+            columns: [
+              { text: '', width:'*' },
+              { text: 'Total:', alignment: 'right', style:'tableHeader', width:80 },
+              { text: '$' + total.toLocaleString(undefined,{minimumFractionDigits:2}), alignment:'right', style:'total' }
+            ],
+            margin: [0,6,0,0]
+          },
+          // --- summary below the table ---
+          {
+            columns: [
+              { text: 'Total Amount To Invoice:', bold: true, color:'#444', width:120 },
+              { text: '$' + total.toLocaleString(undefined,{minimumFractionDigits:2}), color:'#2a7bbd', bold:true, width:85 },
+              { text: 'Total Hours Worked:', bold: true, color:'#444', width:105 },
+              { text: totalHours.toFixed(2) + ' hrs', color:'#2a7bbd', bold:true }
+            ],
+            margin: [0,14,0,0],
+            fontSize: 11
+          }
+        ],
+        styles: {
+          header: { fontSize: 22, bold: true, color:'#2a7bbd' },
+          tableHeader: { fillColor:'#2a7bbd', color:'#fff', bold:true, fontSize:11, margin: [0,3,0,3]},
+          label: { color:'#888', fontSize: 10, bold:true, margin:[0,2,0,0] },
+          mini: { color:'#999', fontSize:9 },
+          total: { bold:true, fontSize:12, color:'#2a7bbd' }
+        },
+        defaultStyle: { fontSize: 10 }
+      };
+
+      pdfMake.createPdf(docDef).download(invoiceNumber + ".pdf");
+      // Log it
+      let logs = JSON.parse(localStorage.getItem("invoice_logs")||"[]");
+      logs.unshift(`[${new Date().toLocaleString()}] ${sender.name} created ${invoiceNumber}.pdf\n`);
+      localStorage.setItem("invoice_logs", JSON.stringify(logs.slice(0,50)));
+      fetchLogs();
+      showNotif("Invoice generated! PDF will download.");
+    }
+  });
+});
+  </script>
+</body>
+</html>
